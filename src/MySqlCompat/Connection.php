@@ -40,29 +40,13 @@ class Connection {
 	 */
 	protected $row_seek = array();
 
-	public function __destruct() {
-		fclose($this->resource);
-	}
-
-	public function getResourceId() {
-		return (string)$this->resource;
-	}
-
-	public static function createConnectionSignature($host, $username, $password, $client_flags) {
-		return md5("$host::$username::$password::$client_flags");
-	}
-
-	public function getSignature() {
-		return $this->signature;
-	}
-
-	/**
-	 * mysql_connect
-	 * http://www.php.net/manual/en/function.mysql-connect.php
-	 */
-	public function mysql_connect($host, $username, $password, $newLink = false, $clientFlags = false) {
+	public function __construct($host, $username, $password, $persistent=false, $clientFlags = false) {}
 		$this->signature = self::createSignature($host, $username, $password, $clientFlags);
-		$flags = $this->translateFlags($clientFlags);
+		$flags = $this->flagsToDriverOptions($clientFlags);
+
+		if ($persistent) {
+			$flags[PDO::ATTR_PERSISTENT] = true;
+		}
 		
 		// Set connection params
 		$this->params = array (
@@ -92,28 +76,33 @@ class Connection {
 		
 		return false;
 	}
-	
-	/**
-	 * mysql_pconnect
-	 * http://www.php.net/manual/en/function.mysql-pconnect.php
-	 */
-	public function mysql_pconnect($host, $username, $password, $newLink = false, $clientFlags = false) {
-		$persistent = PDO::ATTR_PERSISTENT;
-		$clientFlags = ($clientFlags !== false) ? array_merge($clientFlags, $persistent) : $persistent;
-		return $this->mysql_connect($host, $username, $password, $newLink, $clientFlags);
+
+	public function __destruct() {
+		fclose($this->resource);
+	}
+
+	public function getResourceId() {
+		return (string)$this->resource;
+	}
+
+	public static function createConnectionSignature($host, $username, $password, $client_flags) {
+		return md5("$host::$username::$password::$client_flags");
+	}
+
+	public function getSignature() {
+		return $this->signature;
 	}
 	
 	/**
 	 * mysql_select_db
 	 * http://www.php.net/manual/en/function.mysql-select-db.php
 	 */
-	public function mysql_select_db($databaseName, $link = false) {
-		$link = $this->getLink($link);
+	public function mysql_select_db($databaseName) {
 
 		// Select the DB
 		try {
-			$this->_params[$link]['databaseName'] = $databaseName;
-			return $this->mysql_query("USE {$databaseName}", $link);
+			$this->params['databaseName'] = $databaseName;
+			return $this->mysql_query("USE {$databaseName}");
 		} catch (PDOException $e) {
 			return false;
 		}
@@ -125,26 +114,27 @@ class Connection {
 	 * mysql_query
 	 * http://www.php.net/manual/en/function.mysql-query.php
 	 */
-	public function mysql_query($query, $link = false) {
-		$link = $this->getLink($link);
+	public function mysql_query($query) {
 
 		try {
-			if ($res = $this->_instances[$link]->query($query)) {
-				$this->_params[$link]['rowCount'] = $res->rowCount();
-				$this->_params[$link]['lastQuery'] = $res;
-				$this->loadError($link, false);
+			if ($res = $this->pdo->query($query)) {
+				$this->params['rowCount'] = $res->rowCount();
+				$this->params['lastQuery'] = $res;
+				$this->loadError(false);
 				return $res;
 			}
 		} catch (PDOException $e) {
-			$this->loadError($link, $e);
+			$this->loadError($e);
 		}
 
-		$this->_params[$link]['rowCount'] = -1;
-		$this->_params[$link]['lastQuery'] = false;
+		$this->params['rowCount'] = -1;
+		$this->params['lastQuery'] = false;
 
 		// Set query error
-		$this->_params[$link]['errno'] = $this->_instances[$link]->errorCode()[0];
-		$this->_params[$link]['error'] = $this->_instances[$link]->errorInfo()[2];
+		$error_code = $this->pdo->errorCode();
+		$error_info = $this->pdo->errorInfo();
+		$this->params['errno'] = $error_code[0];
+		$this->params['error'] = $error_info[2];
 		return false;
 	}
 	
@@ -152,8 +142,8 @@ class Connection {
 	 * mysql_unbuffered_query
 	 * http://www.php.net/manual/en/function.mysql-unbuffered-query.php
 	 */
-	public function mysql_unbuffered_query($query, $link = false) {
-		return $this->mysql_query($query, $link);
+	public function mysql_unbuffered_query($query) {
+		return $this->mysql_query($query);
 	}
 
 	/**
@@ -169,7 +159,7 @@ class Connection {
 		}
 
 		if ($doCounts === true) {
-			return $this->_mysqlGetLengths($last, $elementId);
+			return $this->mysqlGetLengths($last, $elementId);
 		}
 
 		$hash = false;
@@ -276,31 +266,29 @@ class Connection {
 	 * mysql_ping
 	 * http://www.php.net/manual/en/function.mysql-ping.php
 	 */
-	public function mysql_ping($link = false) {
-		$link = $this->getLink($link);
+	public function mysql_ping() {
 
 		try {
-			$this->_instances[$link]->query('SELECT 1');
-			$this->loadError($link, false);
+			$this->pdo->query('SELECT 1');
+			$this->loadError(false);
 		} catch (PDOException $e) {
 			try {
 				// Reconnect
 				$set = $this->mysql_connect(
-					$this->_params[$link]['server'],
-					$this->_params[$link]['username'],
-					$this->_params[$link]['password'],
-					$this->_params[$link]['newLink'],
-					$this->_params[$link]['clientFlags'],
-					$link
+					$this->params['server'],
+					$this->params['username'],
+					$this->params['password'],
+					$this->params['newLink'],
+					$this->params['clientFlags'],
 				);
 			} catch (PDOException $e) {
-				$this->loadError($link, $e);
+				$this->loadError($e);
 				return false;
 			}
 
 			// Select db if any
-			if (isset($this->_params[$link]['databaseName'])) {
-				$set = $this->mysql_select_db($this->_params[$link]['databaseName'], $link);
+			if (isset($this->params['databaseName'])) {
+				$set = $this->mysql_select_db($this->params['databaseName']);
 				
 				if (!$set) {
 					return false;
@@ -315,20 +303,18 @@ class Connection {
 	 * mysql_affected_rows
 	 * http://www.php.net/manual/en/function.mysql-affected-rows.php
 	 */
-	public function mysql_affected_rows($link = false) {
-		$link = $this->getLink($link);
+	public function mysql_affected_rows() {
 		
-		return $this->_params[$link]['rowCount'];
+		return $this->params['rowCount'];
 	}
 
 	/**
 	 * mysql_client_encoding
 	 * http://www.php.net/manual/en/function.mysql-client-encoding.php
 	 */
-	public function mysql_client_encoding($link = false) {
-		$link = $this->getLink($link);
+	public function mysql_client_encoding() {
 
-		$res = $this->_instances[$link]->query('SELECT @@character_set_database')->fetch(PDO::FETCH_NUM);
+		$res = $this->pdo->query('SELECT @@character_set_database')->fetch(PDO::FETCH_NUM);
 
 		return $res[0];
 	}
@@ -337,12 +323,11 @@ class Connection {
 	 * mysql_close
 	 * http://www.php.net/manual/en/function.mysql-close.php
 	 */
-	public function mysql_close($link = false) {
-		$link = $this->getLink($link);
+	public function mysql_close() {
 
-		if (isset($this->_instances[$link])) {
-			$this->_instances[$link] = null;
-			unset($this->_instances[$link]);
+		if (isset($this->pdo)) {
+			$this->pdo = null;
+			unset($this->pdo);
 			return true;
 		}
 		
@@ -353,9 +338,8 @@ class Connection {
 	 * mysql_create_db
 	 * http://www.php.net/manual/en/function.mysql-create-db.php
 	 */
-	public function mysql_create_db($databaseName, $link = false) {
-		$link = $this->getLink($link);
-		return $this->_instances[$link]->prepare('CREATE DATABASE ' . $databaseName)->execute();
+	public function mysql_create_db($databaseName) {
+		return $this->pdo->prepare('CREATE DATABASE ' . $databaseName)->execute();
 	}
 
 	/**
@@ -372,10 +356,9 @@ class Connection {
 	 * mysql_list_dbs
 	 * http://www.php.net/manual/en/function.mysql-list-dbs.php
 	 */
-	public function mysql_list_dbs($link = false) {
-		$link = $this->getLink($link);
+	public function mysql_list_dbs() {
 
-		return $this->_instances[$link]->query('SHOW DATABASES');
+		return $this->pdo->query('SHOW DATABASES');
 	}
 	
 	/**
@@ -399,32 +382,29 @@ class Connection {
 	 * mysql_db_query
 	 * http://www.php.net/manual/en/function.mysql-db-query.php
 	 */
-	public function mysql_db_query($databaseName, $query, $link = false) {
-		$link = $this->getLink($link);
+	public function mysql_db_query($databaseName, $query) {
 		
-		$this->mysql_select_db($databaseName, $link);
+		$this->mysql_select_db($databaseName);
 		
-		return $this->mysql_query($query, $link);
+		return $this->mysql_query($query);
 	}
 	
 	/**
 	 * mysql_drop_db
 	 * http://www.php.net/manual/en/function.mysql-drop-db.php
 	 */
-	public function mysql_drop_db($databaseName, $link = false) {
-		$link = $this->getLink($link);
+	public function mysql_drop_db($databaseName) {
 
-		return $this->_instances[$link]->prepare('DROP DATABASE ' . $databaseName)->execute();
+		return $this->pdo->prepare('DROP DATABASE ' . $databaseName)->execute();
 	}
 	
 	/**
 	 * mysql_thread_id
 	 * http://www.php.net/manual/en/function.mysql-thread-id.php
 	 */
-	public function mysql_thread_id($link = false) {
-		$link = $this->getLink($link);
+	public function mysql_thread_id() {
 
-		$res = $this->_instances[$link]
+		$res = $this->pdo
 			->query('SELECT CONNECTION_ID()')->fetch(PDO::FETCH_NUM);
 			
 		return $res[0];
@@ -434,10 +414,9 @@ class Connection {
 	 * mysql_list_tables
 	 * http://www.php.net/manual/en/function.mysql-list-tables.php
 	 */
-	public function mysql_list_tables($databaseName, $link = false) {
-		$link = $this->getLink($link);
+	public function mysql_list_tables($databaseName) {
 
-		return $this->_instances[$link]->query('SHOW TABLES FROM ' . $databaseName);
+		return $this->pdo->query('SHOW TABLES FROM ' . $databaseName);
 	}
 	
 	/**
@@ -479,7 +458,7 @@ class Connection {
 			$result = current($result);
 		}
 
-		return $this->_mysqlGetLengths($result, $fieldOffset);
+		return $this->mysqlGetLengths($result, $fieldOffset);
 	}
 
 	/**
@@ -533,28 +512,25 @@ class Connection {
 	 * mysql_stat
 	 * http://www.php.net/manual/en/function.mysql-stat.php
 	 */
-	public function mysql_stat($link = false)  {
-		$link = $this->getLink($link);
-		return $this->_instances[$link]->getAttribute(PDO::ATTR_SERVER_INFO);
+	public function mysql_stat()  {
+		return $this->pdo->getAttribute(PDO::ATTR_SERVER_INFO);
 	}
 	
 	/**
 	 * mysql_get_server_info
 	 * http://www.php.net/manual/en/function.mysql-get-server-info.php
 	 */
-	public function mysql_get_server_info($link = false)  {
-		$link = $this->getLink($link);
-		return $this->_instances[$link]->getAttribute(PDO::ATTR_SERVER_VERSION);
+	public function mysql_get_server_info()  {
+		return $this->pdo->getAttribute(PDO::ATTR_SERVER_VERSION);
 	}
 	
 	/**
 	 * mysql_get_proto_info
 	 * http://www.php.net/manual/en/function.mysql-get-proto-info.php
 	 */
-	public function mysql_get_proto_info($link = false) {
-		$link = $this->getLink($link);
+	public function mysql_get_proto_info() {
 
-		$res = $this->_instances[$link]
+		$res = $this->pdo
 			->query("SHOW VARIABLES LIKE 'protocol_version'")->fetch(PDO::FETCH_NUM);
 			
 		return (int) $res[1];
@@ -564,18 +540,16 @@ class Connection {
 	 * mysql_get_host_info
 	 * http://www.php.net/manual/en/function.mysql-get-server-info.php
 	 */
-	public function mysql_get_host_info($link = false)  {
-		$link = $this->getLink($link);
-		return $this->_instances[$link]->getAttribute(PDO::ATTR_CONNECTION_STATUS);
+	public function mysql_get_host_info()  {
+		return $this->pdo->getAttribute(PDO::ATTR_CONNECTION_STATUS);
 	}
 	
 	/**
 	 * mysql_get_client_info
 	 * http://www.php.net/manual/en/function.mysql-get-client-info.php
 	 */
-	public function mysql_get_client_info($link = false)  {
-		$link = $this->getLink($link);
-		return $this->_instances[$link]->getAttribute(PDO::ATTR_CLIENT_VERSION);
+	public function mysql_get_client_info()  {
+		return $this->pdo->getAttribute(PDO::ATTR_CLIENT_VERSION);
 	}
 	
 	/**
@@ -624,70 +598,63 @@ class Connection {
 	 * mysql_list_processes
 	 * http://www.php.net/manual/en/function.mysql-list-processes.php
 	 */
-	public function mysql_list_processes($link = false)  {
-		$link = $this->getLink($link);
-		return $this->_instances[$link]->query("SHOW PROCESSLIST");
+	public function mysql_list_processes()  {
+		return $this->pdo->query("SHOW PROCESSLIST");
 	}
 
 	/**
 	 * mysql_set_charset
 	 * http://www.php.net/manual/en/function.mysql-set-charset.php
 	 */
-	public function mysql_set_charset($charset, $link = false)  {
-		$link = $this->getLink($link);
+	public function mysql_set_charset($charset)  {
 		$set = "SET character_set_results = '$charset', character_set_client = '$charset', character_set_connection = '$charset', character_set_database = '$charset', character_set_server = '$charset'";
-		return $this->_instances[$link]->query($set);
+		return $this->pdo->query($set);
 	}
 	
 	/**
 	 * mysql_insert_id
 	 * http://www.php.net/manual/en/function.mysql-insert-id.php
 	 */
-	public function mysql_insert_id($link = false) {
-		$link = $this->getLink($link);
-		return $this->_instances[$link]->lastInsertId();
+	public function mysql_insert_id() {
+		return $this->pdo->lastInsertId();
 	}
 	
 	/**
 	 * mysql_list_fields
 	 * http://www.php.net/manual/en/function.mysql-list-fields.php
 	 */
-	public function mysql_list_fields($databaseName, $tableName, $link = false) {
-		$link = $this->getLink($link);
-		return $this->_instances[$link]->query("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE  TABLE_SCHEMA = '$databaseName' AND TABLE_NAME = '$tableName'")->fetchAll();
+	public function mysql_list_fields($databaseName, $tableName) {
+		return $this->pdo->query("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE  TABLE_SCHEMA = '$databaseName' AND TABLE_NAME = '$tableName'")->fetchAll();
 	}
 	
 	/**
 	 * mysql_errno
 	 * http://www.php.net/manual/en/function.mysql-errno.php
 	 */
-	public function mysql_errno($link = false)  {
-		$link = $this->getLink($link, false);
-		return $this->_params[$link]['errno'];
+	public function mysql_errno()  {
+		return $this->params['errno'];
 	}
 
 	/**
 	 * mysql_error
 	 * http://www.php.net/manual/en/function.mysql-error.php
 	 */
-	public function mysql_error($link = false)  {
-		$link = $this->getLink($link, false);
-		return $this->_params[$link]['error'];
+	public function mysql_error()  {
+		return $this->params['error'];
 	}
 	
 	/**
 	 * mysql_real_escape_string
 	 * http://www.php.net/manual/en/function.mysql-real-escape-string.php
 	 */
-	public function mysql_real_escape_string($string, $link = false) {
-		$link = $this->getLink($link);
+	public function mysql_real_escape_string($string) {
 
 		try {
-			$string = $this->_instances[$link]->quote($string);
-			$this->loadError($link, false);
+			$string = $this->pdo->quote($string);
+			$this->loadError(false);
 			return substr($string, 1, -1);
 		} catch (PDOException $e) {
-			$this->loadError($link, $e);
+			$this->loadError($e);
 			return false;
 		}
 		
@@ -698,9 +665,8 @@ class Connection {
 	 * mysql_escape_string
 	 * http://www.php.net/manual/en/function.mysql-escape-string.php
 	 */
-	public function mysql_escape_string($string, $link = false) {
-		$link = $this->getLink($link, false);
-		return $this->mysql_real_escape_string($string, $link);
+	public function mysql_escape_string($string) {
+		return $this->mysql_real_escape_string($string);
 	}
 
 	/**
@@ -716,16 +682,15 @@ class Connection {
 	 *
 	 * http://www.php.net/manual/en/function.mysql-escape-string.php
 	 */
-	public function mysql_info($link = false) {
-		$link = $this->getLink($link);
+	public function mysql_info() {
 
-		$query = $this->_params[$link]['lastQuery'];
+		$query = $this->params['lastQuery'];
 
 		if (!isset($query->queryString)) {
 			return false;
 		}
 		
-		$affected = $this->_params[$link]['rowCount'];
+		$affected = $this->params['rowCount'];
 
 		if (strtoupper(substr($query->queryString, 0, 5)) == 'INSERT INTO') {
 			return "Records: {$affected}  Duplicates: 0  Warnings: 0";
@@ -763,26 +728,7 @@ class Connection {
 		
 		// Reset arrays
 		$this->_instances = array(array());
-		$this->_params    = array();
-	}
-
-	/**
-	 * is_resource function over ride
-	 *
-	 * @param RESOURCE $resource
-	 *
-	 * @return boolean
-	 */
-	public function is_resource($resource) {
-		// Check for a mysql result
-		if (is_object($resource) && $resource instanceof PDOStatement) {
-			return true;
-		// Check if it is a mysql instance
-		} else if (isset($this->_instances[$resource]) && !empty($this->_instances[$resource])) {
-			return true;
-		}
-
-		return is_resource($resource);
+		$this->params    = array();
 	}
 
 	/**
@@ -801,7 +747,7 @@ class Connection {
 		// Check if it is a mysql instance
 		if (isset($this->_instances[$resource]) && !empty($this->_instances[$resource])) {
 			// Check type
-			if ($this->_params[$resource]['clientFlags'] == PDO::ATTR_PERSISTENT){
+			if ($this->params[$resource]['clientFlags'] == PDO::ATTR_PERSISTENT){
 				return 'mysql link persistent';
 			} else {
 				return 'mysql link';
@@ -960,14 +906,14 @@ class Connection {
 	 * @param  string
 	 * @return array
 	 */
-	protected function translateFlags($mysqlFlags) {
-		if ($mysqlFlags == false || empty($mysqlFlags)) {
+	protected function flagsToDriverOptions($flags) {
+		if ($flags == false || empty($flags)) {
 			return array();
 		}
 		
 		// Array it
-		if (!is_array($mysqlFlags)) {
-			$mysqlFlags = array($mysqlFlags);
+		if (!is_array($flags)) {
+			$flags = array($flags);
 		}
 
 		/*
@@ -976,8 +922,8 @@ class Connection {
 		 * need to manually add that flag in using PDO constants
 		 * located here: http://php.net/manual/en/ref.pdo-mysql.php
 		 */
-		$pdoParams = array();
-		foreach ($mysqlFlags as $flag) {
+		$driver_options = array();
+		foreach ($flags as $flag) {
 			switch ($flag) {
 				// CLIENT_FOUND_ROWS (found instead of affected rows)
 				case 2:
@@ -1001,54 +947,29 @@ class Connection {
 					break;
 			}
 			
-			$pdoParams[] = $params;
+			$driver_options[] = $params;
 		}
 
-		return $pdoParams;
+		return $driver_options;
 	}
 
 	/**
 	 * Load data into array
 	 *
-	 * @param int                       $link
 	 * @param PDO|PDOException|false    $object
 	 *
 	 * @return void
 	 */
-	protected function loadError($link, $object) {
+	protected function loadError($object) {
 		// Reset errors
 		if ($object === false || is_null($object)) {
-			$this->_params[$link]['errno'] = 0;
-			$this->_params[$link]['error'] = "";
+			$this->params['errno'] = 0;
+			$this->params['error'] = "";
 			return;
 		}
 		// Set error
-		$this->_params[$link]['errno'] = $object->getCode();
-		$this->_params[$link]['error'] = $object->getMessage();
-	}
-	
-	/**
-	 * get last db connection
-	 *
-	 * @param   int     $link
-	 * @param   boolean $validate
-	 *
-	 * @return int
-	 */
-	protected function getLink($link, $validate = true) {
-		if ($link === false) {
-			$link = count($this->_instances);
-		}
-
-		if ($validate === true && !isset($this->_instances[$link]) || empty($this->_instances[$link])) {
-			$error = '';
-			if (isset($this->_instances[$link])) {
-				die($this->_params[$link]['errno'] .': ' . $this->_params[$link]['error']);
-			} else {
-				die('No db at instance #' . ($link - 1));
-			}
-		}
-		return $link;
+		$this->params['errno'] = $object->getCode();
+		$this->params['error'] = $object->getMessage();
 	}
 	
 	/**
@@ -1059,7 +980,7 @@ class Connection {
 	 *
 	 * @return  array
 	 */
-	protected function _mysqlGetLengths(&$resultSet = false, $elementId = false) {
+	protected function mysqlGetLengths(&$resultSet = false, $elementId = false) {
 		// If we don't have data
 		if (empty($resultSet) || is_null($resultSet)) {
 			if ($elementId === false) {
